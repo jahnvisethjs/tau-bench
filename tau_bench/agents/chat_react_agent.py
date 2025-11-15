@@ -2,6 +2,7 @@
 
 import json
 from litellm import completion
+import tiktoken
 
 from tau_bench.agents.base import Agent
 from tau_bench.envs.base import Env
@@ -23,6 +24,7 @@ class ChatReActAgent(Agent):
         provider: str,
         use_reasoning: bool = True,
         temperature: float = 0.0,
+                token_budget: Optional[int] = None,
     ) -> None:
         instruction = REACT_INSTRUCTION if use_reasoning else ACT_INSTRUCTION
         self.prompt = (
@@ -33,10 +35,17 @@ class ChatReActAgent(Agent):
         self.temperature = temperature
         self.use_reasoning = use_reasoning
         self.tools_info = tools_info
+                self.token_budget = token_budget
+        self.total_tokens = 0
+        # Initialize tokenizer for qwen models
+        try:
+            self.tokenizer = tiktoken.encoding_for_model("gpt-3.5-turbo")  # fallback
+        except:
+            self.tokenizer = tiktoken.get_encoding("cl100k_base")
 
     def generate_next_step(
         self, messages: List[Dict[str, Any]]
-    ) -> Tuple[Dict[str, Any], Action, float]:
+    ) -> Tuple[Dict[str, Any], Action, float], int]:
         res = completion(
             model=self.model,
             custom_llm_provider=self.provider,
@@ -56,12 +65,15 @@ class ChatReActAgent(Agent):
         assert "name" in action_parsed
         assert "arguments" in action_parsed
         action = Action(name=action_parsed["name"], kwargs=action_parsed["arguments"])
-        return message.model_dump(), action, res._hidden_params["response_cost"]
-
-    def solve(
-        self, env: Env, task_index: Optional[int] = None, max_num_steps: int = 30
+                
+        # Count tokens in the response
+        token_count = len(self.tokenizer.encode(message.content))
+        
+                return message.model_dump(), action, res._hidden_params["response_cost"], token_count        self, env: Env, task_index: Optional[int] = None, max_num_steps: int = 30
     ) -> SolveResult:
         response = env.reset(task_index=task_index)
+            # Reset token counter for new task
+        self.total_tokens = 0
         reward = 0.0
         messages: List[Dict[str, Any]] = [
             {"role": "system", "content": self.prompt},
@@ -70,8 +82,16 @@ class ChatReActAgent(Agent):
         total_cost = 0.0
         info = {}
         for _ in range(max_num_steps):
-            message, action, cost = self.generate_next_step(messages)
-            response = env.step(action)
+            message, action, cost, token_count = self.generate_next_step(messages)            response = env.step(action)
+                        
+            # Track total tokens and enforce budget
+            self.total_tokens += token_count
+            if self.token_budget is not None and self.total_tokens >= self.token_budget:
+                # Budget forcing: terminate early when budget exceeded
+                info["budget_exceeded"] = True
+                info["total_tokens_used"] = self.total_tokens
+                break
+            
             obs = response.observation
             reward = response.reward
             info = {**info, **response.info.model_dump()}
@@ -86,6 +106,9 @@ class ChatReActAgent(Agent):
             total_cost += cost
             if response.done:
                 break
+                        # Add total tokens to info
+        info["total_tokens_used"] = self.total_tokens
+        
         return SolveResult(
             messages=messages,
             reward=reward,
