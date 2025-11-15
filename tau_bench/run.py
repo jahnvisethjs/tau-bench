@@ -21,8 +21,7 @@ def run(config: RunConfig) -> List[EnvRunResult]:
     assert config.env in ["retail", "airline"], "Only retail and airline envs are supported"
     assert config.model_provider in provider_list, "Invalid model provider"
     assert config.user_model_provider in provider_list, "Invalid user model provider"
-    assert config.agent_strategy in ["tool-calling", "act", "react", "few-shot"], "Invalid agent strategy"
-    assert config.task_split in ["train", "test", "dev"], "Invalid task split"
+    assert config.agent_strategy in ["tool-calling", "act", "react", "few-shot", "chat-react"], "Invalid agent strategy"    assert config.task_split in ["train", "test", "dev"], "Invalid task split"
     assert config.user_strategy in [item.value for item in UserStrategy], "Invalid user strategy"
 
     random.seed(config.seed)
@@ -172,6 +171,20 @@ def agent_factory(
             provider=config.model_provider,
             few_shot_displays=few_shot_displays,
             temperature=config.temperature,
+        )
+            elif config.agent_strategy == "chat-react":
+                        # ReAct with budget forcing and wait tokens from https://arxiv.org/abs/2501.19393
+        from tau_bench.agents.chat_react_agent import ChatReActAgent
+
+        return ChatReActAgent(
+            tools_info=tools_info,
+            wiki=wiki,
+            model=config.model,
+            provider=config.model_provider,
+            use_reasoning=True,
+            temperature=config.temperature,
+            token_budget=1000,  # Budget forcing with 1000 tokens
+            enable_wait_tokens=True,  # Enable wait token appending
         )
     else:
         raise ValueError(f"Unknown agent strategy: {config.agent_strategy}")
