@@ -71,8 +71,9 @@ class ChatReActAgent(Agent):
         # Count tokens in the response
         token_count = len(self.tokenizer.encode(message.content))
         
-                return message.model_dump(), action, res._hidden_params["response_cost"], token_count        self, env: Env, task_index: Optional[int] = None, max_num_steps: int = 30
-    ) -> SolveResult:
+            return message.model_dump(), action, res._hidden_params["response_cost"], token_count
+
+        def solve(self, env: Env, task_index: Optional[int] = None) -> SolveResult:
         response = env.reset(task_index=task_index)
             # Reset token counter for new task
         self.total_tokens = 0
