@@ -25,6 +25,7 @@ class ChatReActAgent(Agent):
         use_reasoning: bool = True,
         temperature: float = 0.0,
                 token_budget: Optional[int] = None,
+                enable_wait_tokens: bool = False,
     ) -> None:
         instruction = REACT_INSTRUCTION if use_reasoning else ACT_INSTRUCTION
         self.prompt = (
@@ -36,6 +37,7 @@ class ChatReActAgent(Agent):
         self.use_reasoning = use_reasoning
         self.tools_info = tools_info
                 self.token_budget = token_budget
+                self.enable_wait_tokens = enable_wait_tokens
         self.total_tokens = 0
         # Initialize tokenizer for qwen models
         try:
@@ -91,6 +93,17 @@ class ChatReActAgent(Agent):
                 info["budget_exceeded"] = True
                 info["total_tokens_used"] = self.total_tokens
                 break
+
+                        # Wait token appending: extend thinking if budget remains
+            if self.enable_wait_tokens and action.name == RESPOND_ACTION_NAME:
+                # Check if we have budget remaining
+                if self.token_budget is None or self.total_tokens < self.token_budget:
+                    # Append 2 Wait tokens to encourage continued reasoning
+                    messages.append({"role": "user", "content": "Wait"})
+                    messages.append({"role": "user", "content": "Wait"})
+                    # Continue the loop to generate more reasoning
+                    continue
+            
             
             obs = response.observation
             reward = response.reward
