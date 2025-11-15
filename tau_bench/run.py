@@ -173,7 +173,7 @@ def agent_factory(
             few_shot_displays=few_shot_displays,
             temperature=config.temperature,
         )
-            elif config.agent_strategy == "chat-react":
+        elif config.agent_strategy == "chat-react":
                         # ReAct with budget forcing and wait tokens from https://arxiv.org/abs/2501.19393
         from tau_bench.agents.chat_react_agent import ChatReActAgent
 
