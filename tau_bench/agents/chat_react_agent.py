@@ -59,8 +59,10 @@ class ChatReActAgent(Agent):
         action_str = message.content.split("Action:")[-1].strip()
         try:
             action_parsed = json.loads(action_str)
-        except json.JSONDecodeError:
+        except json.JSONDecodeError as e:
             # this is a hack
+                        # Log parsing error for debugging
+                        print(f"Warning: JSON parsing failed for action: {action_str[:100]}... Error: {e}")
             action_parsed = {
                 "name": RESPOND_ACTION_NAME,
                 "arguments": {RESPOND_ACTION_FIELD_NAME: action_str},
@@ -68,6 +70,11 @@ class ChatReActAgent(Agent):
         assert "name" in action_parsed
         assert "arguments" in action_parsed
         action = Action(name=action_parsed["name"], kwargs=action_parsed["arguments"])
+
+                # Validate that the action name is available
+                available_tool_names = [tool["function"]["name"] for tool in self.tools_info] + [RESPOND_ACTION_NAME]
+                if action_parsed["name"] not in available_tool_names:
+                                print(f"Warning: Agent attempted to call unknown tool '{action_parsed['name']}'.")
                 
         # Count tokens in the response
         token_count = len(self.tokenizer.encode(message.content))
@@ -85,9 +92,25 @@ class ChatReActAgent(Agent):
         ]
         total_cost = 0.0
         info = {}
+                # Track consecutive failures to prevent premature giving up
+                consecutive_failures = 0
+                MAX_CONSECUTIVE_FAILURES = 3
         for _ in range(self.max_num_steps):
             message, action, cost, token_count = self.generate_next_step(messages)            
             response = env.step(action)
+
+                        # Check if the action resulted in an error
+                        if "error" in response.observation.lower() or "not found" in response.observation.lower():
+                                            consecutive_failures += 1
+                                            if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                                                                    # Add a hint message to help the agent
+                                                                    messages.append({
+                                                                                                "role": "system",
+                                                                                                "content": "You've encountered multiple consecutive errors. Consider: 1) asking the user for more information, 2) trying a different tool, or 3) explaining the situation to the user before transferring."
+                                                                                            })
+                                                                    consecutive_failures = 0  # Reset after hint
+                                                            else:
+                                                                                consecutive_failures = 0  # Reset on success
                         
             # Track total tokens and enforce budget
             self.total_tokens += token_count
@@ -143,6 +166,15 @@ Action:
 {{"name": <The name of the action>, "arguments": <The arguments to the action in json format>}}
 
 The Action will be parsed, so it must be valid JSON.
+
+IMPORTANT GUIDELINES:
+1. If you need information from the user that they haven't provided, ask them using the respond action
+2. Before calling transfer_to_human_agents, try at least 3-4 different approaches
+3. If a tool returns an error, analyze WHY it failed and try a different approach
+4. Do not make up or assume user information - always ask if uncertain
+5. When searching for users, if one method fails, try different search methods before giving up
+
+The Action will be parsed, so it must be valid
 
 You should not use made-up or placeholder arguments.
 
