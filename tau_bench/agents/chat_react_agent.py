@@ -43,8 +43,7 @@ class ChatReActAgent(Agent):
         self.total_tokens = 0
         # Initialize tokenizer for qwen models
         try:
-            self.tokenizer = tiktoken.encoding_for_model("gpt-3.5-turbo")  # fallback
-        except:
+            self.tokenizer = tiktoken.encoding_for_model(self.model)  # fallback        except:
             self.tokenizer = tiktoken.get_encoding("cl100k_base")
 
     def generate_next_step(
