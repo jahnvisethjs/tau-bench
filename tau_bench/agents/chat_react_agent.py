@@ -36,8 +36,8 @@ class ChatReActAgent(Agent):
         self.temperature = temperature
         self.use_reasoning = use_reasoning
         self.tools_info = tools_info
-                self.token_budget = token_budget
-                self.enable_wait_tokens = enable_wait_tokens
+        self.token_budget = token_budget
+        self.enable_wait_tokens = enable_wait_tokens
         self.total_tokens = 0
         # Initialize tokenizer for qwen models
         try:
@@ -47,7 +47,7 @@ class ChatReActAgent(Agent):
 
     def generate_next_step(
         self, messages: List[Dict[str, Any]]
-    ) -> Tuple[Dict[str, Any], Action, float], int]:
+    ) -> Tuple[[Dict[str, Any], Action, float], int]:
         res = completion(
             model=self.model,
             custom_llm_provider=self.provider,
@@ -71,8 +71,9 @@ class ChatReActAgent(Agent):
         # Count tokens in the response
         token_count = len(self.tokenizer.encode(message.content))
         
-                return message.model_dump(), action, res._hidden_params["response_cost"], token_count        self, env: Env, task_index: Optional[int] = None, max_num_steps: int = 30
-    ) -> SolveResult:
+        return message.model_dump(), action, res._hidden_params["response_cost"], token_count
+
+    def solve(self, env: Env, task_index: Optional[int] = None) -> SolveResult:
         response = env.reset(task_index=task_index)
             # Reset token counter for new task
         self.total_tokens = 0
@@ -84,7 +85,8 @@ class ChatReActAgent(Agent):
         total_cost = 0.0
         info = {}
         for _ in range(max_num_steps):
-            message, action, cost, token_count = self.generate_next_step(messages)            response = env.step(action)
+            message, action, cost, token_count = self.generate_next_step(messages)            
+            response = env.step(action)
                         
             # Track total tokens and enforce budget
             self.total_tokens += token_count
@@ -93,7 +95,7 @@ class ChatReActAgent(Agent):
                 info["budget_exceeded"] = True
                 info["total_tokens_used"] = self.total_tokens
                 break
-
+    
                         # Wait token appending: extend thinking if budget remains
             if self.enable_wait_tokens and action.name == RESPOND_ACTION_NAME:
                 # Check if we have budget remaining
