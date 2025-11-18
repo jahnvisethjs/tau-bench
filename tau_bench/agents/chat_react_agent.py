@@ -99,18 +99,18 @@ class ChatReActAgent(Agent):
             message, action, cost, token_count = self.generate_next_step(messages)            
             response = env.step(action)
 
-                        # Check if the action resulted in an error
-                        if "error" in response.observation.lower() or "not found" in response.observation.lower():
-                                            consecutive_failures += 1
-                                            if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
-                                                                    # Add a hint message to help the agent
-                                                                    messages.append({
-                                                                                                "role": "system",
-                                                                                                "content": "You've encountered multiple consecutive errors. Consider: 1) asking the user for more information, 2) trying a different tool, or 3) explaining the situation to the user before transferring."
-                                                                                            })
-                                                                    consecutive_failures = 0  # Reset after hint
-                                                            else:
-                                                                                consecutive_failures = 0  # Reset on success
+            # Check if the action resulted in an error
+                                    if "error" in response.observation.lower() or "not found" in response.observation.lower():
+                                                            consecutive_failures += 1
+                                                            if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                                                                                        # Add a hint message to help the agent
+                                                                                        messages.append({
+                                                                                                                        "role": "system",
+                                                                                                                        "content": "You've encountered multiple consecutive errors. Consider: 1) asking the user for more information, 2) trying a different tool, or 3) explaining the situation to the user before transferring."
+                                                                                                                })
+                                                                                        consecutive_failures = 0  # Reset after hint
+                                                                        else:
+                                                                                                consecutive_failures = 0  # Reset on success
                         
             # Track total tokens and enforce budget
             self.total_tokens += token_count
