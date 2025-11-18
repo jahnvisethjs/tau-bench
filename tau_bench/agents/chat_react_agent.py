@@ -39,7 +39,7 @@ class ChatReActAgent(Agent):
         self.tools_info = tools_info
         self.token_budget = token_budget
         self.enable_wait_tokens = enable_wait_tokens
-                self.max_num_steps = max_num_steps
+        self.max_num_steps = max_num_steps
         self.total_tokens = 0
         # Initialize tokenizer for qwen models
         try:
