@@ -99,16 +99,16 @@ def main():
         config = parse_args()
         # Grid search for chat-react agent
         if config.agent_strategy == "chat-react":
-                    print(f"Running grid search over token budgets: {TOKEN_BUDGETS}")
-                    for token_budget in TOKEN_BUDGETS:
-                                    print(f"\nRunning with token_budget: {token_budget}")
-                                    # Create a copy of config and modify log_dir and token_budget
-# Create a copy of config with updated log_dir and token_budget
-                        config_with_budget = config.model_copy(update={
-                                        "log_dir": f"{config.log_dir}/budget_{token_budget}",
-                                        "token_budget": token_budget,
-                                    }))
-                    run(config_with_budget)
+            print(f"Running grid search over token budgets: {TOKEN_BUDGETS}")
+            for token_budget in TOKEN_BUDGETS:
+                print(f"\nRunning with token_budget: {token_budget}")
+                # Create a copy of config and modify log_dir and token_budget
+                # Create a copy of config with updated log_dir and token_budget
+                config_with_budget = config.model_copy(update={
+                    "log_dir": f"{config.log_dir}/budget_{token_budget}",
+                    "token_budget": token_budget,
+                })
+                run(config_with_budget)
         else:
             run(config)
 
