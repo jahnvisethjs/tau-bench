@@ -24,9 +24,9 @@ class ChatReActAgent(Agent):
         provider: str,
         use_reasoning: bool = True,
         temperature: float = 0.0,
-                token_budget: Optional[int] = None,
+        token_budget: Optional[int] = None,
                 enable_wait_tokens: bool = False,
-                    max_num_steps: int = 30,
+            max_num_steps: int = 30,
     ) -> None:
         instruction = REACT_INSTRUCTION if use_reasoning else ACT_INSTRUCTION
         self.prompt = (
