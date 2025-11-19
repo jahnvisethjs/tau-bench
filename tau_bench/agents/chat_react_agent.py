@@ -27,14 +27,14 @@ class ChatReActAgent(Agent):
         token_budget: Optional[int] = None,
         enable_wait_tokens: bool = False,
         max_num_steps: int = 30,
-                    num_wait_tokens: int = 2,
+        num_wait_tokens: int = 2,
     ) -> None:
         instruction = REACT_INSTRUCTION if use_reasoning else ACT_INSTRUCTION
-                # Add budget constraint prompt if token_budget is set
-                if self.token_budget is not None:
-                                budget_constraint = f"\n\n# Budget Constraint\nYou may use up to {self.token_budget} tokens total for all your reasoning and actions before producing your final answer. If you reach your budget, you must immediately provide your final answer. Plan your reasoning steps carefully to stay within this limit.\n"
-                            else:
-                                            budget_constraint = ""
+        # Add budget constraint prompt if token_budget is set
+        if self.token_budget is not None:
+            budget_constraint = f"\n\n# Budget Constraint\nYou may use up to {self.token_budget} tokens total for all your reasoning and actions before producing your final answer. If you reach your budget, you must immediately provide your final answer. Plan your reasoning steps carefully to stay within this limit.\n"
+        else:
+            budget_constraint = ""
         self.prompt = (
             wiki + "\n#Available tools\n" + json.dumps(tools_info)  + budget_constraint + instruction
         )
