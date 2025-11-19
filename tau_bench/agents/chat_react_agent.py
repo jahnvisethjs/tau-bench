@@ -25,8 +25,8 @@ class ChatReActAgent(Agent):
         use_reasoning: bool = True,
         temperature: float = 0.0,
         token_budget: Optional[int] = None,
-                enable_wait_tokens: bool = False,
-            max_num_steps: int = 30,
+        enable_wait_tokens: bool = False,
+        max_num_steps: int = 30,
     ) -> None:
         instruction = REACT_INSTRUCTION if use_reasoning else ACT_INSTRUCTION
         self.prompt = (
@@ -43,8 +43,8 @@ class ChatReActAgent(Agent):
         self.total_tokens = 0
         # Initialize tokenizer for qwen models
         try:
-                        self.tokenizer = tiktoken.encoding_for_model(self.model)
-                    except:
+            self.tokenizer = tiktoken.encoding_for_model(self.model)
+        except:
             self.tokenizer = tiktoken.get_encoding("cl100k_base")
 
     def generate_next_step(
@@ -62,8 +62,8 @@ class ChatReActAgent(Agent):
             action_parsed = json.loads(action_str)
         except json.JSONDecodeError as e:
             # this is a hack
-                        # Log parsing error for debugging
-                        print(f"Warning: JSON parsing failed for action: {action_str[:100]}... Error: {e}")
+            # Log parsing error for debugging
+            print(f"Warning: JSON parsing failed for action: {action_str[:100]}... Error: {e}")
             action_parsed = {
                 "name": RESPOND_ACTION_NAME,
                 "arguments": {RESPOND_ACTION_FIELD_NAME: action_str},
@@ -72,11 +72,11 @@ class ChatReActAgent(Agent):
         assert "arguments" in action_parsed
         action = Action(name=action_parsed["name"], kwargs=action_parsed["arguments"])
 
-                # Validate that the action name is available
-                available_tool_names = [tool["function"]["name"] for tool in self.tools_info] + [RESPOND_ACTION_NAME]
-                if action_parsed["name"] not in available_tool_names:
-                                print(f"Warning: Agent attempted to call unknown tool '{action_parsed['name']}'.")
-                
+        # Validate that the action name is available
+        available_tool_names = [tool["function"]["name"] for tool in self.tools_info] + [RESPOND_ACTION_NAME]
+        if action_parsed["name"] not in available_tool_names:
+            print(f"Warning: Agent attempted to call unknown tool '{action_parsed['name']}'.")
+        
         # Count tokens in the response
         token_count = len(self.tokenizer.encode(message.content))
         
@@ -93,26 +93,26 @@ class ChatReActAgent(Agent):
         ]
         total_cost = 0.0
         info = {}
-                # Track consecutive failures to prevent premature giving up
-                consecutive_failures = 0
-                MAX_CONSECUTIVE_FAILURES = 3
+        # Track consecutive failures to prevent premature giving up
+        consecutive_failures = 0
+        MAX_CONSECUTIVE_FAILURES = 3
         for _ in range(self.max_num_steps):
             message, action, cost, token_count = self.generate_next_step(messages)            
             response = env.step(action)
 
             # Check if the action resulted in an error
-                                    if "error" in response.observation.lower() or "not found" in response.observation.lower():
-                                                            consecutive_failures += 1
-                                                            if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
-                                                                                        # Add a hint message to help the agent
-                                                                                        messages.append({
-                                                                                                                        "role": "system",
-                                                                                                                        "content": "You've encountered multiple consecutive errors. Consider: 1) asking the user for more information, 2) trying a different tool, or 3) explaining the situation to the user before transferring."
-                                                                                                                })
-                                                                                        consecutive_failures = 0  # Reset after hint
-                                                                        else:
-                                                                                                consecutive_failures = 0  # Reset on success
-                        
+            if "error" in response.observation.lower() or "not found" in response.observation.lower():
+                consecutive_failures += 1
+                if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                    # Add a hint message to help the agent
+                    messages.append({
+                        "role": "system",
+                        "content": "You've encountered multiple consecutive errors. Consider: 1) asking the user for more information, 2) trying a different tool, or 3) explaining the situation to the user before transferring."
+                    })
+                consecutive_failures = 0  # Reset after hint
+            else:
+                consecutive_failures = 0  # Reset on success
+
             # Track total tokens and enforce budget
             self.total_tokens += token_count
             if self.token_budget is not None and self.total_tokens >= self.token_budget:
@@ -121,7 +121,7 @@ class ChatReActAgent(Agent):
                 info["total_tokens_used"] = self.total_tokens
                 break
     
-                        # Wait token appending: extend thinking if budget remains
+            # Wait token appending: extend thinking if budget remains
             if self.enable_wait_tokens and action.name == RESPOND_ACTION_NAME:
                 # Check if we have budget remaining
                 if self.token_budget is None or self.total_tokens < self.token_budget:
@@ -131,22 +131,23 @@ class ChatReActAgent(Agent):
                     # Continue the loop to generate more reasoning
                     continue
             
-            
             obs = response.observation
             reward = response.reward
             info = {**info, **response.info.model_dump()}
             if action.name != RESPOND_ACTION_NAME:
                 obs = "API output: " + obs
+
             messages.extend(
                 [
                     message,
                     {"role": "user", "content": obs},
                 ]
             )
+
             total_cost += cost
             if response.done:
                 break
-                        # Add total tokens to info
+        # Add total tokens to info
         info["total_tokens_used"] = self.total_tokens
         
         return SolveResult(
