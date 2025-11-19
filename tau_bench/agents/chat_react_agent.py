@@ -129,8 +129,8 @@ class ChatReActAgent(Agent):
                 if self.token_budget is None or self.total_tokens < self.token_budget:
                 # Append Wait tokens to encourage continued reasoning
                 for _ in range(self.num_wait_tokens):
-                    messages.append({"role": "user", "content": "Wait"})                    # Continue the loop to generate more reasoning
-                    continue
+                        messages.append({"role": "user", "content": "Wait"})                    # Continue the loop to generate more reasoning
+                        continue
             
             obs = response.observation
             reward = response.reward
