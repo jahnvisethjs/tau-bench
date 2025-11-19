@@ -3,6 +3,7 @@
 import json
 from litellm import completion
 import tiktoken
+import time
 
 from tau_bench.agents.base import Agent
 from tau_bench.envs.base import Env
@@ -66,6 +67,8 @@ class ChatReActAgent(Agent):
             temperature=self.temperature,
         )
         message = res.choices[0].message
+                # Rate limiting to avoid API throttling
+        time.sleep(12)  # Stay under 5 requests per minute
         action_str = message.content.split("Action:")[-1].strip()
         try:
             action_parsed = json.loads(action_str)
