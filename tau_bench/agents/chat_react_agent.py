@@ -290,6 +290,9 @@ Action:
 {{"name": <The name of the action>, "arguments": <The arguments to the action in json format>}}
 
 The Action will be parsed, so it must be valid JSON.
+CRITICAL: All strings in JSON must be enclosed in double quotes. For example:
+CORRECT: {"name": "respond", "arguments": {"content": "text"}}
+INCORRECT: {"name": respond, "arguments": {"content": "text"}}
 
 IMPORTANT GUIDELINES:
 1. If you need information from the user that they haven't provided, ask them using the respond action
@@ -354,6 +357,9 @@ Action:
 You should not use made-up or placeholder arguments.
 
 The Action will be parsed, so it must be valid JSON.
+CRITICAL: All strings in JSON must be enclosed in double quotes. For example:
+CORRECT: {"name": "respond", "arguments": {"content": "text"}}
+INCORRECT: {"name": respond, "arguments": {"content": "text"}}
 
 For example, if the user says "I want to know the current weather of San Francisco", and there is such a tool available
 ```json
