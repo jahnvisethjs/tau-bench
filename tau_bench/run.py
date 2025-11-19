@@ -184,7 +184,7 @@ def agent_factory(
             provider=config.model_provider,
             use_reasoning=True,
             temperature=config.temperature,
-            token_budget=1000,  # Budget forcing with 1000 tokens
+                        token_budget=config.token_budget,  # Budget forcing from config
             enable_wait_tokens=True,  # Enable wait token appending
         )
     else:
