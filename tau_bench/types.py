@@ -88,4 +88,4 @@ class RunConfig(BaseModel):
     shuffle: int = 0
     user_strategy: str = "llm"
     few_shot_displays_path: Optional[str] = None
-        token_budget: Optional[int] = None
+    token_budget: Optional[int] = None
