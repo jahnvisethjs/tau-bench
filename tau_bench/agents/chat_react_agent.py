@@ -144,7 +144,7 @@ class ChatReActAgent(Agent):
                 ]
             )
 
-            total_cost += cost
+            total_cost += cost if cost is not None else 0
             if response.done:
                 break
         # Add total tokens to info
