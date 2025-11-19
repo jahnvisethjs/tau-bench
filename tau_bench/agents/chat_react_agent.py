@@ -269,4 +269,116 @@ Action:
 {{"name": {RESPOND_ACTION_NAME}, "arguments": {{"{RESPOND_ACTION_FIELD_NAME}": "The current weather of San Francisco is 70F."}}}}
 
 Try to be helpful and always follow the policy. Always make sure you generate valid JSON only.
+
+
+if __name__ == "__main__":
+    import argparse
+    import os
+    from tau_bench.envs import get_env
+    from tau_bench.envs.user import UserStrategy
+    from tau_bench.types import RunConfig
+    from litellm import provider_list
+    import datetime
+    
+    # Budget forcing configuration
+    TOKEN_BUDGETS = [250, 500, 1000, 2000]
+    WAIT_TOKENS = [0, 1, 2, 3, 4, 5]
+    
+    parser = argparse.ArgumentParser(description="Run budget forcing grid search")
+    parser.add_argument("--config", type=str, required=True, help="Task config name")
+    parser.add_argument("--model", type=str, required=True, help="Model name")
+    parser.add_argument("--provider", type=str, required=True, choices=provider_list, help="Provider name")
+    parser.add_argument("--num-tasks", type=int, default=50, help="Number of tasks to run")
+    parser.add_argument("--output-dir", type=str, default="budget_forcing_results", help="Output directory")
+    args = parser.parse_args()
+    
+    # Create output directory
+    os.makedirs(args.output_dir, exist_ok=True)
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_file = os.path.join(args.output_dir, f"results_{timestamp}.json")
+    
+    results = []
+    total_configs = len(TOKEN_BUDGETS) * len(WAIT_TOKENS)
+    current_config = 0
+    
+    print(f"Starting budget forcing grid search with {total_configs} configurations")
+    print(f"Token budgets: {TOKEN_BUDGETS}")
+    print(f"Wait tokens: {WAIT_TOKENS}")
+    print(f"Tasks per config: {args.num_tasks}")
+    print(f"="*80)
+    
+    for token_budget in TOKEN_BUDGETS:
+        for num_wait in WAIT_TOKENS:
+            current_config += 1
+            print(f"\n[{current_config}/{total_configs}] Running: budget={token_budget}, wait_tokens={num_wait}")
+            
+            # Create environment
+            env = get_env(args.config)
+            
+            # Create agent with specific configuration
+            agent = ChatReActAgent(
+                tools_info=env.get_tools_info(),
+                model=args.model,
+                provider=args.provider,
+                token_budget=token_budget,
+                num_wait_tokens=num_wait
+            )
+            
+            # Run tasks
+            task_results = []
+            for task_idx in range(args.num_tasks):
+                task = env.reset(user_strategy=UserStrategy.STATIC)
+                result = agent.solve(task)
+                
+                task_result = {
+                    "task_id": task_idx,
+                    "reward": result.reward,
+                    "total_cost": result.total_cost,
+                    "num_steps": len(result.trajectory),
+                    "budget_exceeded": result.total_cost > token_budget if result.total_cost else False
+                }
+                task_results.append(task_result)
+                
+                if (task_idx + 1) % 10 == 0:
+                    print(f"  Progress: {task_idx + 1}/{args.num_tasks} tasks completed")
+            
+            # Calculate statistics
+            avg_reward = sum(r["reward"] for r in task_results) / len(task_results)
+            avg_cost = sum(r["total_cost"] or 0 for r in task_results) / len(task_results)
+            success_rate = sum(1 for r in task_results if r["reward"] > 0) / len(task_results)
+            budget_exceeded_rate = sum(1 for r in task_results if r["budget_exceeded"]) / len(task_results)            
+            config_result = {
+                "token_budget": token_budget,
+                "num_wait_tokens": num_wait,
+                "avg_reward": avg_reward,
+                "avg_cost": avg_cost,
+                "success_rate": success_rate,
+                "budget_exceeded_rate": budget_exceeded_rate,
+                "task_results": task_results
+            }
+            results.append(config_result)
+            
+            print(f"  Avg Reward: {avg_reward:.3f}")
+            print(f"  Avg Cost: {avg_cost:.1f} tokens")
+            print(f"  Success Rate: {success_rate:.1%}")
+            print(f"  Budget Exceeded: {budget_exceeded_rate:.1%}")
+    
+    # Save results
+    with open(output_file, 'w') as f:
+        json.dump({
+            "config": args.config,
+            "model": args.model,
+            "provider": args.provider,
+            "num_tasks": args.num_tasks,
+            "timestamp": timestamp,
+            "results": results
+        }, f, indent=2)
+    
+    print(f"\n{'='*80}")
+    print(f"Results saved to: {output_file}")
+    print(f"\nSummary Table:")
+    print(f"{'Budget':<10} {'Wait':<6} {'Avg Reward':<12} {'Avg Cost':<12} {'Success%':<10} {'Budget Exceed%':<15}")
+    print(f"{'-'*80}")
+    for r in results:
+        print(f"{r['token_budget']:<10} {r['num_wait_tokens']:<6} {r['avg_reward']:<12.3f} {r['avg_cost']:<12.1f} {r['success_rate']*100:<10.1f} {r['budget_exceeded_rate']*100:<15.1f}")
 """
