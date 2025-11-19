@@ -6,6 +6,9 @@ from tau_bench.run import run
 from litellm import provider_list
 from tau_bench.envs.user import UserStrategy
 
+# Token budgets for grid search (chat-react agent)
+TOKEN_BUDGETS = [250, 500, 1000, 2000]
+
 
 def parse_args() -> RunConfig:
     parser = argparse.ArgumentParser()
@@ -93,8 +96,22 @@ def parse_args() -> RunConfig:
 
 
 def main():
-    config = parse_args()
-    run(config)
+        config = parse_args()
+        # Grid search for chat-react agent
+        if config.agent_strategy == "chat-react":
+                    print(f"Running grid search over token budgets: {TOKEN_BUDGETS}")
+                    for token_budget in TOKEN_BUDGETS:
+                                    print(f"\nRunning with token_budget: {token_budget}")
+                                    # Create a copy of config and modify log_dir and token_budget
+            from dataclasses import replace
+            config_with_budget = replace(
+                                config,
+                                log_dir=f"{config.log_dir}/budget_{token_budget}",
+                                token_budget=token_budget
+                            )
+            run(config_with_budget)
+    else:
+        run(config)
 
 
 if __name__ == "__main__":
