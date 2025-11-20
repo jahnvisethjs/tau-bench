@@ -1,6 +1,7 @@
 # Copyright Sierra
 
 import json
+import re
 from litellm import completion
 import tiktoken
 
@@ -59,7 +60,7 @@ class ChatReActAgent(Agent):
 
     def generate_next_step(
         self, messages: List[Dict[str, Any]]
-    ) -> Tuple[Dict[str, Any], Action, float, int]:  # FIXED: Removed double brackets
+    ) -> Tuple[Dict[str, Any], Action, float, int]:
         res = completion(
             model=self.model,
             custom_llm_provider=self.provider,
@@ -68,16 +69,31 @@ class ChatReActAgent(Agent):
         )
         message = res.choices[0].message
         action_str = message.content.split("Action:")[-1].strip()
+        
         try:
             action_parsed = json.loads(action_str)
         except json.JSONDecodeError as e:
-            # this is a hack
-            # Log parsing error for debugging
-            print(f"Warning: JSON parsing failed for action: {action_str[:100]}... Error: {e}")
-            action_parsed = {
-                "name": RESPOND_ACTION_NAME,
-                "arguments": {RESPOND_ACTION_FIELD_NAME: action_str},
-            }
+            # Try to fix common JSON errors
+            print(f"JSON parse error: {str(e)[:50]}... Attempting to fix...")
+            
+            # Fix 1: Add quotes around unquoted string values for "name" field
+            action_str_fixed = re.sub(
+                r'"name":\s*([a-zA-Z_][a-zA-Z0-9_]*)',  # Match: "name": respond
+                r'"name": "\1"',  # Replace with: "name": "respond"
+                action_str
+            )
+            
+            try:
+                action_parsed = json.loads(action_str_fixed)
+                print(f"✓ Fixed JSON successfully")
+            except:
+                # Still failed, fall back to respond action
+                print(f"✗ Could not fix JSON, using fallback")
+                action_parsed = {
+                    "name": RESPOND_ACTION_NAME,
+                    "arguments": {RESPOND_ACTION_FIELD_NAME: action_str},
+                }
+        
         assert "name" in action_parsed
         assert "arguments" in action_parsed
         action = Action(name=action_parsed["name"], kwargs=action_parsed["arguments"])
@@ -91,8 +107,6 @@ class ChatReActAgent(Agent):
         token_count = len(self.tokenizer.encode(message.content))
         
         return message.model_dump(), action, res._hidden_params["response_cost"], token_count
-
-    # Corrected solve() method logic based on s1 paper
 
     def solve(self, env: Env, task_index: Optional[int] = None) -> SolveResult:
         response = env.reset(task_index=task_index)
@@ -161,69 +175,47 @@ class ChatReActAgent(Agent):
                     break
             
             # Wait token appending (MINIMUM budget enforcement)
-            # Key insight from s1: Only append wait tokens if:
-            # 1. Agent tries to respond early (before minimum budget)
-            # 2. We haven't already appended wait tokens for this attempt
-            # 3. We still have budget remaining
             if self.enable_wait_tokens and action.name == RESPOND_ACTION_NAME:
-                # Check if agent is responding TOO EARLY (before reaching some minimum threshold)
-                # The s1 paper uses wait tokens to encourage LONGER thinking
-                # But only up to a certain point, not infinitely!
-                
-                # Strategy: Only append wait tokens if we're below a MINIMUM budget threshold
-                # and we haven't already tried to extend thinking for this response
-                # minimum_budget = self.token_budget * 0.5 if self.token_budget else 200  # 50% of max or 200 tokens
-                
+                # Check if this is information gathering or final answer
                 response_content = action.kwargs.get(RESPOND_ACTION_FIELD_NAME, "")
                 is_info_gathering = any(phrase in response_content.lower() for phrase in [
                     "could you please provide",
-                    "i need",
-                    "can you provide",
+                    "could you provide",
                     "please provide",
+                    "can you provide",
+                    "may i have",
+                    "i need your",
                     "what is your",
-                    "may i have"
+                    "would you like",
                 ])
                 
+                # Only apply wait tokens to potential FINAL answers, not info gathering
                 if not is_info_gathering:
                     minimum_budget = self.token_budget * 0.5 if self.token_budget else 200
                     
                     if (self.total_tokens < minimum_budget and 
-                        wait_tokens_appended < 1):  # Only once!
+                        wait_tokens_appended < MAX_WAIT_APPENDS):
                         
-                        print(f"Agent tried to give final answer early at {self.total_tokens} tokens. Appending {self.num_wait_tokens} Wait tokens.")
+                        print(f"Agent tried to give final answer early at {self.total_tokens} tokens (min: {minimum_budget}). Appending {self.num_wait_tokens} Wait tokens.")
                         
+                        # Add the assistant's message first
                         messages.append(message)
+                        
+                        # Append "Wait" tokens to encourage more thinking
                         for _ in range(self.num_wait_tokens):
                             messages.append({"role": "user", "content": "Wait"})
                         
+                        # Track that we've appended wait tokens
                         wait_tokens_appended += 1
+                        
+                        # Continue to next iteration (skip executing respond action)
                         continue
-
-
-                # if (self.total_tokens < minimum_budget and 
-                #     wait_tokens_appended < MAX_WAIT_APPENDS):
-                    
-                #     print(f"Agent tried to respond early at {self.total_tokens} tokens (minimum: {minimum_budget}). Appending {self.num_wait_tokens} Wait tokens.")
-                    
-                #     # Add the assistant's message first
-                #     messages.append(message)
-                    
-                #     # Append "Wait" tokens to encourage more thinking
-                #     for _ in range(self.num_wait_tokens):
-                #         messages.append({"role": "user", "content": "Wait"})
-                    
-                #     # Track that we've appended wait tokens
-                #     wait_tokens_appended += 1
-                    
-                #     # Continue to next iteration (skip executing respond action)
-                #     continue
-
-                else:
-                    # Either we've reached minimum budget OR already appended wait tokens
-                    # Let the agent respond normally
-                    print(f"Agent responding at {self.total_tokens} tokens. Allowing response.")
-                    # Reset counter for next potential early response
-                    wait_tokens_appended = 0
+                    else:
+                        # Either we've reached minimum budget OR already appended wait tokens
+                        # Let the agent respond normally
+                        print(f"Agent responding at {self.total_tokens} tokens. Allowing response.")
+                        # Reset counter for next potential early response
+                        wait_tokens_appended = 0
             
             # Normal flow: Execute the action
             response = env.step(action)
@@ -258,6 +250,7 @@ class ChatReActAgent(Agent):
             info=info,
         )
 
+
 REACT_INSTRUCTION = f"""
 # Instruction
 You need to act as an agent that use the above tools to help the user according to the above policy.
@@ -270,14 +263,18 @@ Action:
 
 The Action will be parsed, so it must be valid JSON.
 
+CRITICAL JSON FORMATTING RULES:
+- ALL string values MUST be in double quotes
+- Action names MUST be quoted strings
+- CORRECT: {{"name": "respond", "arguments": {{"content": "Hello"}}}}
+- WRONG: {{"name": respond, "arguments": {{"content": "Hello"}}}}
+
 IMPORTANT GUIDELINES:
 1. If you need information from the user that they haven't provided, ask them using the respond action
 2. Before calling transfer_to_human_agents, try at least 3-4 different approaches
 3. If a tool returns an error, analyze WHY it failed and try a different approach
 4. Do not make up or assume user information - always ask if uncertain
 5. When searching for users, if one method fails, try different search methods before giving up
-
-The Action will be parsed, so it must be valid
 
 You should not use made-up or placeholder arguments.
 
@@ -315,7 +312,7 @@ And if the tool returns "70F", your response can be:
 Thought:
 I can answer the user now.
 Action:
-{{"name": {RESPOND_ACTION_NAME}, "arguments": {{"{RESPOND_ACTION_FIELD_NAME}": "The current weather of San Francisco is 70F."}}}}
+{{"name": "respond", "arguments": {{"content": "The current weather of San Francisco is 70F."}}}}
 
 Try to be helpful and always follow the policy.
 """
@@ -366,7 +363,7 @@ Action:
 
 And if the tool returns "70F", your response can be:
 Action:
-{{"name": {RESPOND_ACTION_NAME}, "arguments": {{"{RESPOND_ACTION_FIELD_NAME}": "The current weather of San Francisco is 70F."}}}}
+{{"name": "respond", "arguments": {{"content": "The current weather of San Francisco is 70F."}}}}
 
 Try to be helpful and always follow the policy. Always make sure you generate valid JSON only.
 
