@@ -88,6 +88,3 @@ class RunConfig(BaseModel):
     shuffle: int = 0
     user_strategy: str = "llm"
     few_shot_displays_path: Optional[str] = None
-    token_budget: Optional[int] = None
-    num_wait_tokens: int = 2  # ADDED: Number of wait tokens to append for budget forcing
-    enable_wait_tokens: bool = False  # ADDED: Flag to enable wait token extrapolation
