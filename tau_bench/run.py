@@ -121,6 +121,8 @@ def run(config: RunConfig) -> List[EnvRunResult]:
     return results
 
 
+# Replace the agent_factory function in your main run.py (document 7) with this:
+
 def agent_factory(
     tools_info: List[Dict[str, Any]], wiki, config: RunConfig
 ) -> Agent:
@@ -174,7 +176,7 @@ def agent_factory(
             temperature=config.temperature,
         )
     elif config.agent_strategy == "chat-react":
-                    # ReAct with budget forcing and wait tokens from https://arxiv.org/abs/2501.19393
+        # ReAct with budget forcing and wait tokens from https://arxiv.org/abs/2501.19393
         from tau_bench.agents.chat_react_agent import ChatReActAgent
     
         return ChatReActAgent(
@@ -184,13 +186,13 @@ def agent_factory(
             provider=config.model_provider,
             use_reasoning=True,
             temperature=config.temperature,
-            token_budget=1000,  # Budget forcing with 1000 tokens
-            enable_wait_tokens=True,  # Enable wait token appending
+            token_budget=config.token_budget,  # CHANGED: from hardcoded 1000 to config
+            enable_wait_tokens=config.enable_wait_tokens,  # CHANGED: from hardcoded True to config
+            num_wait_tokens=config.num_wait_tokens,  # ADDED: pass num_wait_tokens
         )
     else:
         raise ValueError(f"Unknown agent strategy: {config.agent_strategy}")
-
-
+    
 def display_metrics(results: List[EnvRunResult]) -> None:
     def is_successful(reward: float) -> bool:
         return (1 - 1e-6) <= reward <= (1 + 1e-6)
