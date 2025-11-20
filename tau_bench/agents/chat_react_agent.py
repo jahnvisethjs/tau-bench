@@ -92,131 +92,144 @@ class ChatReActAgent(Agent):
         
         return message.model_dump(), action, res._hidden_params["response_cost"], token_count
 
-    def solve(self, env: Env, task_index: Optional[int] = None) -> SolveResult:
-        response = env.reset(task_index=task_index)
-        
-        # Reset token counter for new task
-        self.total_tokens = 0
-        reward = 0.0
-        messages: List[Dict[str, Any]] = [
-            {"role": "system", "content": self.prompt},
-            {"role": "user", "content": response.observation},
-        ]
-        total_cost = 0.0
-        info = {}
-        
-        # Track consecutive failures to prevent premature giving up
-        consecutive_failures = 0
-        MAX_CONSECUTIVE_FAILURES = 3
-        
-        for step_num in range(self.max_num_steps):
-            # Generate next step
-            message, action, cost, token_count = self.generate_next_step(messages)
-            
-            # Track total thinking tokens (assistant output only, as per s1 paper)
-            self.total_tokens += token_count
-            
-            # PRIORITY 1 FIX: Budget forcing - check if budget exceeded
-            budget_exceeded = (self.token_budget is not None and 
-                             self.total_tokens >= self.token_budget)
-            
-            if budget_exceeded:
-                info["budget_exceeded"] = True
-                info["total_tokens_used"] = self.total_tokens
-                
-                # Force final response if agent hasn't already responded
-                if action.name != RESPOND_ACTION_NAME:
-                    print(f"Budget exceeded ({self.total_tokens}/{self.token_budget} tokens). Forcing final answer.")
-                    # Create a forced response action
-                    forced_message = {
-                        "role": "assistant",
-                        "content": f"Thought:\nI've reached my token budget limit.\nAction:\n{json.dumps({'name': RESPOND_ACTION_NAME, 'arguments': {RESPOND_ACTION_FIELD_NAME: 'I apologize, but I need to transfer you to a human agent as I need more time to properly assist you.'}})}",
-                    }
-                    forced_action = Action(
-                        name=RESPOND_ACTION_NAME,
-                        arguments={RESPOND_ACTION_FIELD_NAME: "I apologize, but I need to transfer you to a human agent as I need more time to properly assist you."}
-                    )
-                    
-                    # Execute the forced response
-                    response = env.step(forced_action)
-                    messages.extend([
-                        forced_message,
-                        {"role": "user", "content": response.observation},
-                    ])
-                    reward = response.reward
-                    info = {**info, **response.info.model_dump()}
-                    break
-                else:
-                    # Agent already responded, just execute it
-                    response = env.step(action)
-                    obs = response.observation
-                    reward = response.reward
-                    info = {**info, **response.info.model_dump()}
-                    messages.extend([
-                        message,
-                        {"role": "user", "content": obs},
-                    ])
-                    break
-            
-            # PRIORITY 1 FIX: Wait token appending (budget forcing extrapolation)
-            # According to s1 paper: suppress end-of-thinking and append "Wait" when model tries to stop
-            if self.enable_wait_tokens and action.name == RESPOND_ACTION_NAME:
-                # Check if we still have budget remaining to extend thinking
-                if self.token_budget is None or self.total_tokens < self.token_budget:
-                    print(f"Agent tried to respond early at {self.total_tokens} tokens. Appending {self.num_wait_tokens} Wait tokens.")
-                    
-                    # Add the assistant's message first
-                    messages.append(message)
-                    
-                    # Append "Wait" tokens to encourage more thinking
-                    for _ in range(self.num_wait_tokens):
-                        messages.append({"role": "user", "content": "Wait"})
-                    
-                    # FIXED: Continue to next iteration of the outer loop
-                    continue  # This skips executing the respond action and generates more reasoning
-            
-            # Normal flow: Execute the action
-            response = env.step(action)
+    # Corrected solve() method logic based on s1 paper
 
-            # Check if the action resulted in an error
-            if "error" in response.observation.lower() or "not found" in response.observation.lower():
-                consecutive_failures += 1
-                if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
-                    # Add a hint message to help the agent
-                    messages.append({
-                        "role": "system",
-                        "content": "You've encountered multiple consecutive errors. Consider: 1) asking the user for more information, 2) trying a different tool, or 3) explaining the situation to the user before transferring."
-                    })
-                    consecutive_failures = 0  # Reset after hint
-            else:
-                consecutive_failures = 0  # Reset on success
+def solve(self, env: Env, task_index: Optional[int] = None) -> SolveResult:
+    response = env.reset(task_index=task_index)
     
-            obs = response.observation
-            reward = response.reward
-            info = {**info, **response.info.model_dump()}
+    # Reset token counter for new task
+    self.total_tokens = 0
+    reward = 0.0
+    messages: List[Dict[str, Any]] = [
+        {"role": "system", "content": self.prompt},
+        {"role": "user", "content": response.observation},
+    ]
+    total_cost = 0.0
+    info = {}
+    
+    # Track how many times we've appended wait tokens for THIS response attempt
+    wait_tokens_appended = 0
+    MAX_WAIT_APPENDS = 1  # Only append wait tokens ONCE per early response attempt
+    
+    for step_num in range(self.max_num_steps):
+        # Generate next step
+        message, action, cost, token_count = self.generate_next_step(messages)
+        
+        # Track total thinking tokens (assistant output only, as per s1 paper)
+        self.total_tokens += token_count
+        
+        # Check if budget exceeded (MAXIMUM budget enforcement)
+        budget_exceeded = (self.token_budget is not None and 
+                         self.total_tokens >= self.token_budget)
+        
+        if budget_exceeded:
+            info["budget_exceeded"] = True
+            info["total_tokens_used"] = self.total_tokens
             
+            # Force final response if agent hasn't already responded
             if action.name != RESPOND_ACTION_NAME:
-                obs = "API output: " + obs
-
-            messages.extend([
-                message,
-                {"role": "user", "content": obs},
-            ])
-
-            total_cost += cost if cost is not None else 0
-            
-            if response.done:
+                print(f"Budget exceeded ({self.total_tokens}/{self.token_budget} tokens). Forcing final answer.")
+                # Create a forced response action
+                forced_message = {
+                    "role": "assistant",
+                    "content": f"Thought:\nI've reached my token budget limit.\nAction:\n{json.dumps({'name': RESPOND_ACTION_NAME, 'arguments': {RESPOND_ACTION_FIELD_NAME: 'I apologize, but I need to transfer you to a human agent as I need more time to properly assist you.'}})}",
+                }
+                forced_action = Action(
+                    name=RESPOND_ACTION_NAME,
+                    arguments={RESPOND_ACTION_FIELD_NAME: "I apologize, but I need to transfer you to a human agent as I need more time to properly assist you."}
+                )
+                
+                # Execute the forced response
+                response = env.step(forced_action)
+                messages.extend([
+                    forced_message,
+                    {"role": "user", "content": response.observation},
+                ])
+                reward = response.reward
+                info = {**info, **response.info.model_dump()}
+                break
+            else:
+                # Agent already responded, just execute it
+                response = env.step(action)
+                obs = response.observation
+                reward = response.reward
+                info = {**info, **response.info.model_dump()}
+                messages.extend([
+                    message,
+                    {"role": "user", "content": obs},
+                ])
                 break
         
-        # Add total tokens to info
-        info["total_tokens_used"] = self.total_tokens
+        # Wait token appending (MINIMUM budget enforcement)
+        # Key insight from s1: Only append wait tokens if:
+        # 1. Agent tries to respond early (before minimum budget)
+        # 2. We haven't already appended wait tokens for this attempt
+        # 3. We still have budget remaining
+        if self.enable_wait_tokens and action.name == RESPOND_ACTION_NAME:
+            # Check if agent is responding TOO EARLY (before reaching some minimum threshold)
+            # The s1 paper uses wait tokens to encourage LONGER thinking
+            # But only up to a certain point, not infinitely!
+            
+            # Strategy: Only append wait tokens if we're below a MINIMUM budget threshold
+            # and we haven't already tried to extend thinking for this response
+            minimum_budget = self.token_budget * 0.5 if self.token_budget else 200  # 50% of max or 200 tokens
+            
+            if (self.total_tokens < minimum_budget and 
+                wait_tokens_appended < MAX_WAIT_APPENDS):
+                
+                print(f"Agent tried to respond early at {self.total_tokens} tokens (minimum: {minimum_budget}). Appending {self.num_wait_tokens} Wait tokens.")
+                
+                # Add the assistant's message first
+                messages.append(message)
+                
+                # Append "Wait" tokens to encourage more thinking
+                for _ in range(self.num_wait_tokens):
+                    messages.append({"role": "user", "content": "Wait"})
+                
+                # Track that we've appended wait tokens
+                wait_tokens_appended += 1
+                
+                # Continue to next iteration (skip executing respond action)
+                continue
+            else:
+                # Either we've reached minimum budget OR already appended wait tokens
+                # Let the agent respond normally
+                print(f"Agent responding at {self.total_tokens} tokens. Allowing response.")
+                # Reset counter for next potential early response
+                wait_tokens_appended = 0
         
-        return SolveResult(
-            messages=messages,
-            reward=reward,
-            info=info,
-        )
+        # Normal flow: Execute the action
+        response = env.step(action)
+        
+        # Reset wait token counter after any non-respond action
+        if action.name != RESPOND_ACTION_NAME:
+            wait_tokens_appended = 0
 
+        obs = response.observation
+        reward = response.reward
+        info = {**info, **response.info.model_dump()}
+        
+        if action.name != RESPOND_ACTION_NAME:
+            obs = "API output: " + obs
+
+        messages.extend([
+            message,
+            {"role": "user", "content": obs},
+        ])
+
+        total_cost += cost if cost is not None else 0
+        
+        if response.done:
+            break
+    
+    # Add total tokens to info
+    info["total_tokens_used"] = self.total_tokens
+    
+    return SolveResult(
+        messages=messages,
+        reward=reward,
+        info=info,
+    )
 
 REACT_INSTRUCTION = f"""
 # Instruction
