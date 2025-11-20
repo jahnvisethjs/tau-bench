@@ -1,5 +1,5 @@
 # Copyright Sierra
-# TRUE s1 Budget Forcing Implementation - Token Level Control
+# CORRECT s1 Budget Forcing Implementation - Token Level Control
 
 import json
 import re
@@ -48,7 +48,7 @@ class ChatReActAgent(Agent):
         self.tools_info = tools_info
         self.token_budget = token_budget
         self.use_vllm = use_vllm and VLLM_AVAILABLE
-        self.enable_budget_forcing = enable_wait_tokens  # Rename for clarity
+        self.enable_budget_forcing = enable_wait_tokens
         
         # Add budget constraint prompt
         if self.token_budget is not None:
@@ -86,7 +86,6 @@ Best practices:
                 max_model_len=8192,
                 gpu_memory_utilization=0.9,
             )
-            # Get tokenizer for checking respond patterns
             self.vllm_tokenizer = self.vllm_model.get_tokenizer()
         else:
             self.vllm_model = None
@@ -118,7 +117,6 @@ Best practices:
         """Check if the generated text contains a respond action."""
         if '"name": "respond"' in text or '"name":"respond"' in text:
             return True
-        # Also check for respond without quotes (common error)
         if '"name": respond' in text:
             return True
         return False
@@ -130,12 +128,10 @@ Best practices:
         
         action_str = response_text.split("Action:")[-1].strip()
         
-        # Try to parse JSON
         try:
             action_parsed = json.loads(action_str)
             return action_str, action_parsed
         except json.JSONDecodeError:
-            # Try to fix common errors
             action_str_fixed = re.sub(
                 r'"name":\s*([a-zA-Z_][a-zA-Z0-9_]*)',
                 r'"name": "\1"',
@@ -153,10 +149,16 @@ Best practices:
         minimum_budget: Optional[int] = None
     ) -> Tuple[Dict[str, Any], Action, float, int]:
         """
-        TRUE s1 BUDGET FORCING IMPLEMENTATION
+        CORRECT s1 BUDGET FORCING IMPLEMENTATION
         
-        This generates text token-by-token and suppresses early stopping
-        at the GENERATION level, not by adding user messages.
+        This implements budget forcing by:
+        1. Generating with stop tokens that detect "Action:" pattern
+        2. When model tries to respond early, checking if minimum budget is met
+        3. If not met, suppressing the stop and appending "Wait" token
+        4. Continuing generation from the extended prompt
+        
+        Key insight: We detect when the model WANTS to stop (by generating "Action:"),
+        then suppress that by continuing generation with "Wait" appended.
         """
         prompt = self._format_messages_for_vllm(messages)
         
@@ -167,46 +169,42 @@ Best practices:
         else:
             max_new_tokens = 2048
         
-        # CRITICAL: We need to do iterative generation to implement budget forcing
-        # Strategy: Generate in chunks, check if trying to stop early
+        # CRITICAL: Define stop strings that indicate model wants to take action
+        # In ReAct format, "Action:" signals the model wants to act
+        stop_strings = ["Action:", "\n\n\n"]
         
         generated_text = ""
         total_tokens_generated = 0
         forced_continuations = 0
         max_forced_continuations = self.num_wait_tokens
         
+        # Iterative generation with budget forcing
         while total_tokens_generated < max_new_tokens:
-            # Calculate tokens remaining in this chunk
-            chunk_size = min(512, max_new_tokens - total_tokens_generated)
+            chunk_size = min(2048, max_new_tokens - total_tokens_generated)
             
             if chunk_size < 50:
                 break
             
-            # Generate a chunk
+            # Generate until we hit a stop string or max tokens
             sampling_params = SamplingParams(
                 temperature=self.temperature,
                 max_tokens=chunk_size,
-                stop=["User:", "\n\n\n"],  # Natural stop points
+                stop=stop_strings,
+                skip_special_tokens=False,
             )
             
             current_prompt = prompt + generated_text
             outputs = self.vllm_model.generate([current_prompt], sampling_params)
             chunk_text = outputs[0].outputs[0].text
+            finish_reason = outputs[0].outputs[0].finish_reason
             
-            # Count tokens in this chunk
             chunk_tokens = len(self.tokenizer.encode(chunk_text))
             generated_text += chunk_text
             total_tokens_generated += chunk_tokens
             
-            # Check if generation completed naturally
-            finish_reason = outputs[0].outputs[0].finish_reason
-            
-            # Parse to see if there's a complete action
-            _, action_parsed = self._extract_action_from_response(generated_text)
-            
-            # BUDGET FORCING LOGIC
-            if action_parsed and action_parsed.get("name") == RESPOND_ACTION_NAME:
-                # Agent wants to respond - check if we should force more thinking
+            # Check if we stopped because of "Action:" (model wants to respond)
+            if finish_reason == "stop" and any(stop_str in chunk_text for stop_str in stop_strings[:-1]):
+                # Model is trying to take action - check budget forcing
                 current_total = self.total_tokens + total_tokens_generated
                 
                 if (self.enable_budget_forcing and 
@@ -214,29 +212,29 @@ Best practices:
                     current_total < minimum_budget and
                     forced_continuations < max_forced_continuations):
                     
-                    # FORCE CONTINUATION - Add prompt to keep thinking
+                    # BUDGET FORCING: Suppress the stop by continuing with "Wait"
                     print(f"⚠️  Budget forcing at {current_total} tokens (minimum: {minimum_budget})")
                     print(f"   Forcing continuation {forced_continuations + 1}/{max_forced_continuations}")
                     
-                    # Instead of stopping, append a continuation prompt
-                    # This simulates suppressing the stop token
-                    continuation_prompt = "\nThought:\nLet me reconsider and verify my reasoning more carefully before responding.\n"
-                    generated_text += continuation_prompt
-                    total_tokens_generated += len(self.tokenizer.encode(continuation_prompt))
+                    # CRITICAL: Append "Wait" as per s1 paper
+                    # This simulates suppressing the end-of-thinking token
+                    wait_token = " Wait"
+                    generated_text += wait_token
+                    total_tokens_generated += len(self.tokenizer.encode(wait_token))
                     forced_continuations += 1
                     
-                    # Continue generating
+                    # Continue generating - model will reconsider
                     continue
                 else:
-                    # Either reached minimum budget or max continuations
+                    # Budget met or max continuations reached
                     if current_total >= minimum_budget:
-                        print(f"✅ Minimum budget reached ({current_total} >= {minimum_budget}), allowing response")
+                        print(f"✅ Minimum budget reached ({current_total} >= {minimum_budget})")
                     else:
-                        print(f"⚠️  Max continuations reached, allowing response at {current_total} tokens")
+                        print(f"⚠️  Max continuations reached at {current_total} tokens")
                     break
             
-            # If finished for other reasons (stop string, max tokens), break
-            if finish_reason == "stop" or finish_reason == "length":
+            # If finished naturally (length limit, other stop), break
+            if finish_reason == "length":
                 break
         
         # Extract final action
@@ -332,7 +330,7 @@ Best practices:
                 if action.name != RESPOND_ACTION_NAME:
                     forced_action = Action(
                         name=RESPOND_ACTION_NAME,
-                        arguments={RESPOND_ACTION_FIELD_NAME: "I've reached my processing limit. Transferring to human agent."}
+                        arguments={RESPOND_ACTION_FIELD_NAME: "I've reached my processing limit."}
                     )
                     response = env.step(forced_action)
                     reward = response.reward
