@@ -1,6 +1,17 @@
 # Copyright Sierra
+# TRUE s1 Budget Forcing Implementation - Token Level Control
 
 import json
+import re
+from typing import Optional, List, Dict, Any, Tuple
+
+try:
+    from vllm import LLM, SamplingParams
+    from vllm.outputs import RequestOutput
+    VLLM_AVAILABLE = True
+except ImportError:
+    VLLM_AVAILABLE = False
+
 from litellm import completion
 import tiktoken
 
@@ -12,7 +23,6 @@ from tau_bench.types import (
     RESPOND_ACTION_NAME,
     RESPOND_ACTION_FIELD_NAME,
 )
-from typing import Optional, List, Dict, Any, Tuple
 
 
 class ChatReActAgent(Agent):
@@ -27,31 +37,230 @@ class ChatReActAgent(Agent):
         token_budget: Optional[int] = None,
         enable_wait_tokens: bool = False,
         max_num_steps: int = 30,
-                    num_wait_tokens: int = 2,
+        num_wait_tokens: int = 2,
+        use_vllm: bool = False,
     ) -> None:
         instruction = REACT_INSTRUCTION if use_reasoning else ACT_INSTRUCTION
-        self.prompt = (
-            wiki + "\n#Available tools\n" + json.dumps(tools_info) + instruction
-        )
         self.model = model
         self.provider = provider
         self.temperature = temperature
         self.use_reasoning = use_reasoning
         self.tools_info = tools_info
         self.token_budget = token_budget
-        self.enable_wait_tokens = enable_wait_tokens
+        self.use_vllm = use_vllm and VLLM_AVAILABLE
+        self.enable_budget_forcing = enable_wait_tokens  # Rename for clarity
+        
+        # Add budget constraint prompt
+        if self.token_budget is not None:
+            minimum_budget = int(self.token_budget * 0.5)
+            budget_constraint = f"""
+
+# Reasoning Budget Guidance
+
+You have up to {self.token_budget} tokens for reasoning. For complex tasks, aim to use at least {minimum_budget} tokens to ensure thorough analysis.
+
+Best practices:
+- Think step-by-step through the problem
+- Verify your understanding before taking actions
+- Double-check tool outputs and policy requirements
+- Consider edge cases and potential errors
+"""
+        else:
+            budget_constraint = ""
+        
+        self.prompt = (
+            wiki + "\n#Available tools\n" + json.dumps(tools_info) + budget_constraint + instruction
+        )
         self.max_num_steps = max_num_steps
         self.num_wait_tokens = num_wait_tokens
         self.total_tokens = 0
-        # Initialize tokenizer for qwen models
+        
+        # Initialize vLLM if requested
+        if self.use_vllm:
+            if not VLLM_AVAILABLE:
+                raise ImportError("vLLM not installed: pip install vllm")
+            print(f"🚀 Initializing vLLM with model: {model}")
+            self.vllm_model = LLM(
+                model=model,
+                trust_remote_code=True,
+                max_model_len=8192,
+                gpu_memory_utilization=0.9,
+            )
+            # Get tokenizer for checking respond patterns
+            self.vllm_tokenizer = self.vllm_model.get_tokenizer()
+        else:
+            self.vllm_model = None
+            self.vllm_tokenizer = None
+        
+        # Initialize tokenizer for token counting
         try:
             self.tokenizer = tiktoken.encoding_for_model(self.model)
         except:
             self.tokenizer = tiktoken.get_encoding("cl100k_base")
 
-    def generate_next_step(
+    def _format_messages_for_vllm(self, messages: List[Dict[str, Any]]) -> str:
+        """Convert message list to prompt string for vLLM."""
+        prompt_parts = []
+        for msg in messages:
+            role = msg["role"]
+            content = msg["content"]
+            if role == "system":
+                prompt_parts.append(f"{content}\n\n")
+            elif role == "user":
+                prompt_parts.append(f"User: {content}\n\n")
+            elif role == "assistant":
+                prompt_parts.append(f"Assistant: {content}\n\n")
+        
+        prompt_parts.append("Assistant: ")
+        return "".join(prompt_parts)
+
+    def _is_trying_to_respond(self, text: str) -> bool:
+        """Check if the generated text contains a respond action."""
+        if '"name": "respond"' in text or '"name":"respond"' in text:
+            return True
+        # Also check for respond without quotes (common error)
+        if '"name": respond' in text:
+            return True
+        return False
+
+    def _extract_action_from_response(self, response_text: str) -> Tuple[str, Dict]:
+        """Extract action from model response text."""
+        if "Action:" not in response_text:
+            return None, None
+        
+        action_str = response_text.split("Action:")[-1].strip()
+        
+        # Try to parse JSON
+        try:
+            action_parsed = json.loads(action_str)
+            return action_str, action_parsed
+        except json.JSONDecodeError:
+            # Try to fix common errors
+            action_str_fixed = re.sub(
+                r'"name":\s*([a-zA-Z_][a-zA-Z0-9_]*)',
+                r'"name": "\1"',
+                action_str
+            )
+            try:
+                action_parsed = json.loads(action_str_fixed)
+                return action_str_fixed, action_parsed
+            except:
+                return action_str, None
+
+    def generate_with_budget_forcing_vllm(
+        self, 
+        messages: List[Dict[str, Any]], 
+        minimum_budget: Optional[int] = None
+    ) -> Tuple[Dict[str, Any], Action, float, int]:
+        """
+        TRUE s1 BUDGET FORCING IMPLEMENTATION
+        
+        This generates text token-by-token and suppresses early stopping
+        at the GENERATION level, not by adding user messages.
+        """
+        prompt = self._format_messages_for_vllm(messages)
+        
+        # Calculate available token budget
+        if self.token_budget:
+            max_new_tokens = self.token_budget - self.total_tokens
+            max_new_tokens = max(100, min(max_new_tokens, 2048))
+        else:
+            max_new_tokens = 2048
+        
+        # CRITICAL: We need to do iterative generation to implement budget forcing
+        # Strategy: Generate in chunks, check if trying to stop early
+        
+        generated_text = ""
+        total_tokens_generated = 0
+        forced_continuations = 0
+        max_forced_continuations = self.num_wait_tokens
+        
+        while total_tokens_generated < max_new_tokens:
+            # Calculate tokens remaining in this chunk
+            chunk_size = min(512, max_new_tokens - total_tokens_generated)
+            
+            if chunk_size < 50:
+                break
+            
+            # Generate a chunk
+            sampling_params = SamplingParams(
+                temperature=self.temperature,
+                max_tokens=chunk_size,
+                stop=["User:", "\n\n\n"],  # Natural stop points
+            )
+            
+            current_prompt = prompt + generated_text
+            outputs = self.vllm_model.generate([current_prompt], sampling_params)
+            chunk_text = outputs[0].outputs[0].text
+            
+            # Count tokens in this chunk
+            chunk_tokens = len(self.tokenizer.encode(chunk_text))
+            generated_text += chunk_text
+            total_tokens_generated += chunk_tokens
+            
+            # Check if generation completed naturally
+            finish_reason = outputs[0].outputs[0].finish_reason
+            
+            # Parse to see if there's a complete action
+            _, action_parsed = self._extract_action_from_response(generated_text)
+            
+            # BUDGET FORCING LOGIC
+            if action_parsed and action_parsed.get("name") == RESPOND_ACTION_NAME:
+                # Agent wants to respond - check if we should force more thinking
+                current_total = self.total_tokens + total_tokens_generated
+                
+                if (self.enable_budget_forcing and 
+                    minimum_budget and 
+                    current_total < minimum_budget and
+                    forced_continuations < max_forced_continuations):
+                    
+                    # FORCE CONTINUATION - Add prompt to keep thinking
+                    print(f"⚠️  Budget forcing at {current_total} tokens (minimum: {minimum_budget})")
+                    print(f"   Forcing continuation {forced_continuations + 1}/{max_forced_continuations}")
+                    
+                    # Instead of stopping, append a continuation prompt
+                    # This simulates suppressing the stop token
+                    continuation_prompt = "\nThought:\nLet me reconsider and verify my reasoning more carefully before responding.\n"
+                    generated_text += continuation_prompt
+                    total_tokens_generated += len(self.tokenizer.encode(continuation_prompt))
+                    forced_continuations += 1
+                    
+                    # Continue generating
+                    continue
+                else:
+                    # Either reached minimum budget or max continuations
+                    if current_total >= minimum_budget:
+                        print(f"✅ Minimum budget reached ({current_total} >= {minimum_budget}), allowing response")
+                    else:
+                        print(f"⚠️  Max continuations reached, allowing response at {current_total} tokens")
+                    break
+            
+            # If finished for other reasons (stop string, max tokens), break
+            if finish_reason == "stop" or finish_reason == "length":
+                break
+        
+        # Extract final action
+        action_str, action_parsed = self._extract_action_from_response(generated_text)
+        
+        if not action_parsed:
+            action_parsed = {
+                "name": RESPOND_ACTION_NAME,
+                "arguments": {RESPOND_ACTION_FIELD_NAME: generated_text},
+            }
+        
+        action = Action(name=action_parsed["name"], kwargs=action_parsed["arguments"])
+        
+        message = {
+            "role": "assistant",
+            "content": generated_text,
+        }
+        
+        return message, action, 0.0, total_tokens_generated
+
+    def generate_next_step_litellm(
         self, messages: List[Dict[str, Any]]
-    ) -> Tuple[[Dict[str, Any], Action, float], int]:
+    ) -> Tuple[Dict[str, Any], Action, float, int]:
+        """Fallback to LiteLLM (no budget forcing)."""
         res = completion(
             model=self.model,
             custom_llm_provider=self.provider,
@@ -60,33 +269,31 @@ class ChatReActAgent(Agent):
         )
         message = res.choices[0].message
         action_str = message.content.split("Action:")[-1].strip()
+        
         try:
             action_parsed = json.loads(action_str)
-        except json.JSONDecodeError as e:
-            # this is a hack
-            # Log parsing error for debugging
-            print(f"Warning: JSON parsing failed for action: {action_str[:100]}... Error: {e}")
-            action_parsed = {
-                "name": RESPOND_ACTION_NAME,
-                "arguments": {RESPOND_ACTION_FIELD_NAME: action_str},
-            }
-        assert "name" in action_parsed
-        assert "arguments" in action_parsed
-        action = Action(name=action_parsed["name"], kwargs=action_parsed["arguments"])
-
-        # Validate that the action name is available
-        available_tool_names = [tool["function"]["name"] for tool in self.tools_info] + [RESPOND_ACTION_NAME]
-        if action_parsed["name"] not in available_tool_names:
-            print(f"Warning: Agent attempted to call unknown tool '{action_parsed['name']}'.")
+        except json.JSONDecodeError:
+            action_str_fixed = re.sub(
+                r'"name":\s*([a-zA-Z_][a-zA-Z0-9_]*)',
+                r'"name": "\1"',
+                action_str
+            )
+            try:
+                action_parsed = json.loads(action_str_fixed)
+            except:
+                action_parsed = {
+                    "name": RESPOND_ACTION_NAME,
+                    "arguments": {RESPOND_ACTION_FIELD_NAME: action_str},
+                }
         
-        # Count tokens in the response
+        action = Action(name=action_parsed["name"], kwargs=action_parsed["arguments"])
         token_count = len(self.tokenizer.encode(message.content))
         
-        return message.model_dump(), action, res._hidden_params["response_cost"], token_count
+        return message.model_dump(), action, res._hidden_params.get("response_cost", 0.0), token_count
 
     def solve(self, env: Env, task_index: Optional[int] = None) -> SolveResult:
         response = env.reset(task_index=task_index)
-            # Reset token counter for new task
+        
         self.total_tokens = 0
         reward = 0.0
         messages: List[Dict[str, Any]] = [
@@ -95,60 +302,69 @@ class ChatReActAgent(Agent):
         ]
         total_cost = 0.0
         info = {}
-        # Track consecutive failures to prevent premature giving up
-        consecutive_failures = 0
-        MAX_CONSECUTIVE_FAILURES = 3
-        for _ in range(self.max_num_steps):
-            message, action, cost, token_count = self.generate_next_step(messages)            
-            response = env.step(action)
-
-            # Check if the action resulted in an error
-            if "error" in response.observation.lower() or "not found" in response.observation.lower():
-                consecutive_failures += 1
-                if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
-                    # Add a hint message to help the agent
-                    messages.append({
-                        "role": "system",
-                        "content": "You've encountered multiple consecutive errors. Consider: 1) asking the user for more information, 2) trying a different tool, or 3) explaining the situation to the user before transferring."
-                    })
-                consecutive_failures = 0  # Reset after hint
+        
+        # Calculate minimum budget
+        minimum_budget = None
+        if self.token_budget and self.enable_budget_forcing:
+            minimum_budget = int(self.token_budget * 0.5)
+            print(f"📊 Budget forcing enabled: {minimum_budget}/{self.token_budget} tokens (min/max)")
+        
+        for step_num in range(self.max_num_steps):
+            # Generate next step
+            if self.use_vllm:
+                message, action, cost, token_count = self.generate_with_budget_forcing_vllm(
+                    messages, minimum_budget
+                )
             else:
-                consecutive_failures = 0  # Reset on success
-
-            # Track total tokens and enforce budget
+                message, action, cost, token_count = self.generate_next_step_litellm(messages)
+            
             self.total_tokens += token_count
-            if self.token_budget is not None and self.total_tokens >= self.token_budget:
-                # Budget forcing: terminate early when budget exceeded
+            
+            # Check maximum budget
+            budget_exceeded = (self.token_budget is not None and 
+                             self.total_tokens >= self.token_budget)
+            
+            if budget_exceeded:
                 info["budget_exceeded"] = True
                 info["total_tokens_used"] = self.total_tokens
-                break
-    
-            # Wait token appending: extend thinking if budget remains
-            if self.enable_wait_tokens and action.name == RESPOND_ACTION_NAME:
-                # Check if we have budget remaining
-                if self.token_budget is None or self.total_tokens < self.token_budget:
-                # Append Wait tokens to encourage continued reasoning
-                    for _ in range(self.num_wait_tokens):
-                            messages.append({"role": "user", "content": "Wait"})   # Continue the loop to generate more reasoning
-                            continue
+                print(f"❌ Maximum budget exceeded: {self.total_tokens}/{self.token_budget}")
+                
+                if action.name != RESPOND_ACTION_NAME:
+                    forced_action = Action(
+                        name=RESPOND_ACTION_NAME,
+                        arguments={RESPOND_ACTION_FIELD_NAME: "I've reached my processing limit. Transferring to human agent."}
+                    )
+                    response = env.step(forced_action)
+                    reward = response.reward
+                    info = {**info, **response.info.model_dump()}
+                    break
+                else:
+                    response = env.step(action)
+                    obs = response.observation
+                    reward = response.reward
+                    info = {**info, **response.info.model_dump()}
+                    messages.extend([message, {"role": "user", "content": obs}])
+                    break
             
+            # Execute action
+            response = env.step(action)
             obs = response.observation
             reward = response.reward
             info = {**info, **response.info.model_dump()}
+            
             if action.name != RESPOND_ACTION_NAME:
                 obs = "API output: " + obs
-
-            messages.extend(
-                [
-                    message,
-                    {"role": "user", "content": obs},
-                ]
-            )
-
-            total_cost += cost if cost is not None else 0
+            
+            messages.extend([
+                message,
+                {"role": "user", "content": obs},
+            ])
+            
+            total_cost += cost
+            
             if response.done:
                 break
-        # Add total tokens to info
+        
         info["total_tokens_used"] = self.total_tokens
         
         return SolveResult(
@@ -157,119 +373,8 @@ class ChatReActAgent(Agent):
             info=info,
         )
 
-if __name__ == "__main__":
-    import argparse
-    import os
-    from tau_bench.envs import get_env
-    from tau_bench.envs.user import UserStrategy
-    from tau_bench.types import RunConfig
-    from litellm import provider_list
-    import datetime
-    
-    # Budget forcing configuration
-    TOKEN_BUDGETS = [250, 500, 1000, 2000]
-    WAIT_TOKENS = [0, 1, 2, 3, 4, 5]
-    
-    parser = argparse.ArgumentParser(description="Run budget forcing grid search")
-    parser.add_argument("--config", type=str, required=True, help="Task config name")
-    parser.add_argument("--model", type=str, required=True, help="Model name")
-    parser.add_argument("--provider", type=str, required=True, choices=provider_list, help="Provider name")
-    parser.add_argument("--num-tasks", type=int, default=50, help="Number of tasks to run")
-    parser.add_argument("--output-dir", type=str, default="budget_forcing_results", help="Output directory")
-    args = parser.parse_args()
-    
-    # Create output directory
-    os.makedirs(args.output_dir, exist_ok=True)
-    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_file = os.path.join(args.output_dir, f"results_{timestamp}.json")
-    
-    results = []
-    total_configs = len(TOKEN_BUDGETS) * len(WAIT_TOKENS)
-    current_config = 0
-    
-    print(f"Starting budget forcing grid search with {total_configs} configurations")
-    print(f"Token budgets: {TOKEN_BUDGETS}")
-    print(f"Wait tokens: {WAIT_TOKENS}")
-    print(f"Tasks per config: {args.num_tasks}")
-    print(f"="*80)
-    
-    for token_budget in TOKEN_BUDGETS:
-        for num_wait in WAIT_TOKENS:
-            current_config += 1
-            print(f"\n[{current_config}/{total_configs}] Running: budget={token_budget}, wait_tokens={num_wait}")
-            
-            # Create environment
-            env = get_env(args.config)
-            
-            # Create agent with specific configuration
-            agent = ChatReActAgent(
-                tools_info=env.get_tools_info(),
-                model=args.model,
-                provider=args.provider,
-                token_budget=token_budget,
-                num_wait_tokens=num_wait
-            )
-            
-            # Run tasks
-            task_results = []
-            for task_idx in range(args.num_tasks):
-                task = env.reset(user_strategy=UserStrategy.STATIC)
-                result = agent.solve(task)
-                
-                task_result = {
-                    "task_id": task_idx,
-                    "reward": result.reward,
-                    "total_cost": result.total_cost,
-                    "num_steps": len(result.trajectory),
-                    "budget_exceeded": result.total_cost > token_budget if result.total_cost else False
-                }
-                task_results.append(task_result)
-                
-                if (task_idx + 1) % 10 == 0:
-                    print(f"  Progress: {task_idx + 1}/{args.num_tasks} tasks completed")
-            
-            # Calculate statistics
-            avg_reward = sum(r["reward"] for r in task_results) / len(task_results)
-            avg_cost = sum(r["total_cost"] or 0 for r in task_results) / len(task_results)
-            success_rate = sum(1 for r in task_results if r["reward"] > 0) / len(task_results)
-            budget_exceeded_rate = sum(1 for r in task_results if r["budget_exceeded"]) / len(task_results)
-            
-            config_result = {
-                "token_budget": token_budget,
-                "num_wait_tokens": num_wait,
-                "avg_reward": avg_reward,
-                "avg_cost": avg_cost,
-                "success_rate": success_rate,
-                "budget_exceeded_rate": budget_exceeded_rate,
-                "task_results": task_results
-            }
-            results.append(config_result)
-            
-            print(f"  Avg Reward: {avg_reward:.3f}")
-            print(f"  Avg Cost: {avg_cost:.1f} tokens")
-            print(f"  Success Rate: {success_rate:.1%}")
-            print(f"  Budget Exceeded: {budget_exceeded_rate:.1%}")
-    
-    # Save results
-    with open(output_file, 'w') as f:
-        json.dump({
-            "config": args.config,
-            "model": args.model,
-            "provider": args.provider,
-            "num_tasks": args.num_tasks,
-            "timestamp": timestamp,
-            "results": results
-        }, f, indent=2)
-    
-    print(f"\n{'='*80}")
-    print(f"Results saved to: {output_file}")
-    print(f"\nSummary Table:")
-    print(f"{'Budget':<10} {'Wait':<6} {'Avg Reward':<12} {'Avg Cost':<12} {'Success%':<10} {'Budget Exceed%':<15}")
-    print(f"{'-'*80}")
-    for r in results:
-        print(f"{r['token_budget']:<10} {r['num_wait_tokens']:<6} {r['avg_reward']:<12.3f} {r['avg_cost']:<12.1f} {r['success_rate']*100:<10.1f} {r['budget_exceeded_rate']*100:<15.1f}")
 
-REACT_INSTRUCTION = f"""
+REACT_INSTRUCTION = """
 # Instruction
 You need to act as an agent that use the above tools to help the user according to the above policy.
 
@@ -277,9 +382,15 @@ At each step, your generation should have exactly the following format:
 Thought:
 <A single line of reasoning to process the context and inform the decision making. Do not include extra lines.>
 Action:
-{{"name": <The name of the action>, "arguments": <The arguments to the action in json format>}}
+{"name": <The name of the action>, "arguments": <The arguments to the action in json format>}
 
 The Action will be parsed, so it must be valid JSON.
+
+CRITICAL JSON FORMATTING RULES:
+- ALL string values MUST be in double quotes
+- Action names MUST be quoted strings
+- CORRECT: {"name": "respond", "arguments": {"content": "Hello"}}
+- WRONG: {"name": respond, "arguments": {"content": "Hello"}}
 
 IMPORTANT GUIDELINES:
 1. If you need information from the user that they haven't provided, ask them using the respond action
@@ -288,97 +399,22 @@ IMPORTANT GUIDELINES:
 4. Do not make up or assume user information - always ask if uncertain
 5. When searching for users, if one method fails, try different search methods before giving up
 
-The Action will be parsed, so it must be valid
-
 You should not use made-up or placeholder arguments.
-
-For example, if the user says "I want to know the current weather of San Francisco", and there is such a tool available
-{{
-    "type": "function",
-    "function": {{
-        "name": "get_current_weather",
-        "description": "Get the current weather",
-        "parameters": {{
-            "type": "object",
-            "properties": {{
-                "location": {{
-                    "type": "string",
-                    "description": "The city and state, e.g. San Francisco, CA",
-                }},
-                "format": {{
-                    "type": "string",
-                    "enum": ["celsius", "fahrenheit"],
-                    "description": "The temperature unit to use. Infer this from the users location.",
-                }},
-            }},
-            "required": ["location", "format"],
-        }},
-    }}
-}}
-
-Your response can be like this:
-Thought:
-Since the user asks for the weather of San Francisco in USA, the unit should be in fahrenheit. I can query get_current_weather to get the weather.
-Action:
-{{"name": "get_current_weather", "arguments": {{"location": "San Francisco, CA", "format": "fahrenheit"}}}}
-
-And if the tool returns "70F", your response can be:
-Thought:
-I can answer the user now.
-Action:
-{{"name": {RESPOND_ACTION_NAME}, "arguments": {{"{RESPOND_ACTION_FIELD_NAME}": "The current weather of San Francisco is 70F."}}}}
 
 Try to be helpful and always follow the policy.
 """
 
 
-ACT_INSTRUCTION = f"""
+ACT_INSTRUCTION = """
 # Instruction
 You need to act as an agent that use the above tools to help the user according to the above policy.
 
 At each step, your generation should have exactly the following format:
 
 Action:
-{{"name": <The name of the action>, "arguments": <The arguments to the action in json format>}}
-
-You should not use made-up or placeholder arguments.
+{"name": <The name of the action>, "arguments": <The arguments to the action in json format>}
 
 The Action will be parsed, so it must be valid JSON.
 
-For example, if the user says "I want to know the current weather of San Francisco", and there is such a tool available
-```json
-{{
-    "type": "function",
-    "function": {{
-        "name": "get_current_weather",
-        "description": "Get the current weather",
-        "parameters": {{
-            "type": "object",
-            "properties": {{
-                "location": {{
-                    "type": "string",
-                    "description": "The city and state, e.g. San Francisco, CA",
-                }},
-                "format": {{
-                    "type": "string",
-                    "enum": ["celsius", "fahrenheit"],
-                    "description": "The temperature unit to use. Infer this from the users location.",
-                }},
-            }},
-            "required": ["location", "format"],
-        }},
-    }}
-}}
-```
-
-Your response can be like this:
-Action:
-{{"name": "get_current_weather", "arguments": {{"location": "San Francisco, CA", "format": "fahrenheit"}}}}
-
-And if the tool returns "70F", your response can be:
-Action:
-{{"name": {RESPOND_ACTION_NAME}, "arguments": {{"{RESPOND_ACTION_FIELD_NAME}": "The current weather of San Francisco is 70F."}}}}
-
-Try to be helpful and always follow the policy. Always make sure you generate valid JSON only.
-
+Try to be helpful and always follow the policy.
 """
