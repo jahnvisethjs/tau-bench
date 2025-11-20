@@ -88,3 +88,11 @@ class RunConfig(BaseModel):
     shuffle: int = 0
     user_strategy: str = "llm"
     few_shot_displays_path: Optional[str] = None
+    
+    # --- BUDGET FORCING PARAMETERS ADDED HERE ---
+    # These fields correspond to the command line arguments and agent constructor parameters.
+    use_vllm: bool = False
+    token_budget: Optional[int] = None
+    enable_wait_tokens: bool = False
+    num_wait_tokens: int = 2
+    # --------------------------------------------

@@ -68,6 +68,14 @@ def parse_args() -> RunConfig:
     parser.add_argument("--shuffle", type=int, default=0)
     parser.add_argument("--user-strategy", type=str, default="llm", choices=[item.value for item in UserStrategy])
     parser.add_argument("--few-shot-displays-path", type=str, help="Path to a jsonlines file containing few shot displays")
+    
+    # --- ADD BUDGET FORCING ARGUMENTS HERE (THE FIX) ---
+    parser.add_argument("--use-vllm", action="store_true", help="Enable vLLM integration for token control (required for BF).")
+    parser.add_argument("--token-budget", type=int, default=None, help="Maximum tokens allowed for reasoning (Budget Forcing max limit).")
+    parser.add_argument("--enable-wait-tokens", action="store_true", help="Enable the 'Wait' token mechanism for forced extension.")
+    parser.add_argument("--num-wait-tokens", type=int, default=2, help="Maximum number of 'Wait' tokens to inject.")
+    # ----------------------------------------------------
+    
     args = parser.parse_args()
     print(args)
     return RunConfig(
@@ -89,6 +97,13 @@ def parse_args() -> RunConfig:
         shuffle=args.shuffle,
         user_strategy=args.user_strategy,
         few_shot_displays_path=args.few_shot_displays_path,
+        
+        # --- PASS NEW BUDGET FORCING ARGS TO RunConfig (THE FIX) ---
+        use_vllm=args.use_vllm,
+        token_budget=args.token_budget,
+        enable_wait_tokens=args.enable_wait_tokens,
+        num_wait_tokens=args.num_wait_tokens,
+        # -----------------------------------------------------------
     )
 
 
