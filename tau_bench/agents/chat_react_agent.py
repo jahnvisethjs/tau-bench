@@ -172,25 +172,52 @@ class ChatReActAgent(Agent):
                 
                 # Strategy: Only append wait tokens if we're below a MINIMUM budget threshold
                 # and we haven't already tried to extend thinking for this response
-                minimum_budget = self.token_budget * 0.5 if self.token_budget else 200  # 50% of max or 200 tokens
+                # minimum_budget = self.token_budget * 0.5 if self.token_budget else 200  # 50% of max or 200 tokens
                 
-                if (self.total_tokens < minimum_budget and 
-                    wait_tokens_appended < MAX_WAIT_APPENDS):
+                response_content = action.kwargs.get(RESPOND_ACTION_FIELD_NAME, "")
+                is_info_gathering = any(phrase in response_content.lower() for phrase in [
+                    "could you please provide",
+                    "i need",
+                    "can you provide",
+                    "please provide",
+                    "what is your",
+                    "may i have"
+                ])
+                
+                if not is_info_gathering:
+                    minimum_budget = self.token_budget * 0.5 if self.token_budget else 200
                     
-                    print(f"Agent tried to respond early at {self.total_tokens} tokens (minimum: {minimum_budget}). Appending {self.num_wait_tokens} Wait tokens.")
+                    if (self.total_tokens < minimum_budget and 
+                        wait_tokens_appended < 1):  # Only once!
+                        
+                        print(f"Agent tried to give final answer early at {self.total_tokens} tokens. Appending {self.num_wait_tokens} Wait tokens.")
+                        
+                        messages.append(message)
+                        for _ in range(self.num_wait_tokens):
+                            messages.append({"role": "user", "content": "Wait"})
+                        
+                        wait_tokens_appended += 1
+                        continue
+
+
+                # if (self.total_tokens < minimum_budget and 
+                #     wait_tokens_appended < MAX_WAIT_APPENDS):
                     
-                    # Add the assistant's message first
-                    messages.append(message)
+                #     print(f"Agent tried to respond early at {self.total_tokens} tokens (minimum: {minimum_budget}). Appending {self.num_wait_tokens} Wait tokens.")
                     
-                    # Append "Wait" tokens to encourage more thinking
-                    for _ in range(self.num_wait_tokens):
-                        messages.append({"role": "user", "content": "Wait"})
+                #     # Add the assistant's message first
+                #     messages.append(message)
                     
-                    # Track that we've appended wait tokens
-                    wait_tokens_appended += 1
+                #     # Append "Wait" tokens to encourage more thinking
+                #     for _ in range(self.num_wait_tokens):
+                #         messages.append({"role": "user", "content": "Wait"})
                     
-                    # Continue to next iteration (skip executing respond action)
-                    continue
+                #     # Track that we've appended wait tokens
+                #     wait_tokens_appended += 1
+                    
+                #     # Continue to next iteration (skip executing respond action)
+                #     continue
+
                 else:
                     # Either we've reached minimum budget OR already appended wait tokens
                     # Let the agent respond normally
